@@ -1,3 +1,10 @@
+/**
+ * WakaTime CLI Dependencies Manager
+ * 
+ * Handles downloading, installing, and updating the wakatime-cli binary.
+ * Manages version checking and platform-specific binary selection.
+ */
+
 import * as adm_zip from 'adm-zip';
 import * as child_process from 'child_process';
 import * as fs from 'fs';
@@ -12,42 +19,80 @@ import { Options, Setting } from './options';
 import { Desktop } from './desktop';
 import { Logger } from './logger';
 
+/**
+ * Operating system names supported by wakatime-cli
+ */
 enum osName {
   darwin = 'darwin',
   windows = 'windows',
   linux = 'linux',
 }
 
+/**
+ * Dependencies class for managing wakatime-cli binary
+ * Handles automatic download, installation, and updates
+ */
 export class Dependencies {
   private options: Options;
   private logger: Logger;
+  
+  /** Location for storing downloaded CLI */
   private resourcesLocation: string;
+  
+  /** Cached path to local CLI binary */
   private cliLocation?: string = undefined;
+  
+  /** Cached path to globally installed CLI */
   private cliLocationGlobal?: string = undefined;
+  
+  /** Whether CLI is confirmed to be installed */
   private cliInstalled: boolean = false;
+  
+  /** GitHub URL for downloading latest CLI release */
   private githubDownloadUrl = 'https://github.com/wakatime/wakatime-cli/releases/latest/download';
+  
+  /** GitHub API URL for checking latest CLI version */
   private githubReleasesUrl = 'https://api.github.com/repos/wakatime/wakatime-cli/releases/latest';
+  
+  /**
+   * Legacy OS versions that require specific CLI versions
+   * Maps OS names to kernel version requirements and corresponding CLI tags
+   */
   private legacyOperatingSystems: {
     [key in osName]?: {
       kernelLessThan: string;
       tag: string;
     }[];
   } = {
+    // macOS Sierra and older require legacy CLI version
     [osName.darwin]: [{ kernelLessThan: '17.0.0', tag: 'v1.39.1-alpha.1' }],
   };
 
+  /**
+   * Creates a new Dependencies manager instance
+   * @param options - Options instance for configuration
+   * @param logger - Logger instance for debugging
+   * @param resourcesLocation - Directory path for storing CLI binaries
+   */
   constructor(options: Options, logger: Logger, resourcesLocation: string) {
     this.options = options;
     this.logger = logger;
     this.resourcesLocation = resourcesLocation;
   }
 
+  /**
+   * Gets the path to the wakatime-cli binary
+   * Checks for global installation first, then local installation
+   * @returns Path to CLI binary
+   */
   public getCliLocation(): string {
     if (this.cliLocation) return this.cliLocation;
 
+    // Check for globally installed CLI first
     this.cliLocation = this.getCliLocationGlobal();
     if (this.cliLocation) return this.cliLocation;
 
+    // Build local CLI path based on OS and architecture
     const osname = this.osName();
     const arch = this.architecture();
     const ext = Desktop.isWindows() ? '.exe' : '';
@@ -57,6 +102,10 @@ export class Dependencies {
     return this.cliLocation;
   }
 
+  /**
+   * Finds globally installed wakatime-cli using PATH
+   * @returns Path to global CLI or undefined if not found
+   */
   public getCliLocationGlobal(): string | undefined {
     if (this.cliLocationGlobal) return this.cliLocationGlobal;
 
@@ -70,12 +119,20 @@ export class Dependencies {
     return this.cliLocationGlobal;
   }
 
+  /**
+   * Checks if wakatime-cli is installed
+   * @returns true if CLI binary exists at expected location
+   */
   public isCliInstalled(): boolean {
     if (this.cliInstalled) return true;
     this.cliInstalled = fs.existsSync(this.getCliLocation());
     return this.cliInstalled;
   }
 
+  /**
+   * Checks if CLI is installed and up-to-date, installing/updating if needed
+   * @param callback - Callback function to invoke after installation complete
+   */
   public checkAndInstallCli(callback: () => void): void {
     if (!this.isCliInstalled()) {
       this.installCli(callback);
@@ -90,7 +147,13 @@ export class Dependencies {
     }
   }
 
+  /**
+   * Checks if the installed CLI is the latest version
+   * Skips check for global installations (managed externally)
+   * @param callback - Callback function receiving true if latest version
+   */
   private isCliLatest(callback: (arg0: boolean) => void): void {
+    // Don't update global installations
     if (this.getCliLocationGlobal()) {
       callback(true);
       return;
@@ -104,11 +167,13 @@ export class Dependencies {
           let currentVersion = _stdout.toString().trim() + stderr.toString().trim();
           this.logger.debug(`Current wakatime-cli version is ${currentVersion}`);
 
+          // Skip version check for local development builds
           if (currentVersion === '<local-build>') {
             callback(true);
             return;
           }
 
+          // For legacy OS versions, check if we need specific version
           const tag = this.legacyReleaseTag();
           if (tag && currentVersion !== tag) {
             callback(false);
@@ -123,6 +188,8 @@ export class Dependencies {
               const now = Math.round(Date.now() / 1000);
               const lastAccessed = parseInt(accessed.value);
               const fourHours = 4 * 3600;
+              
+              // Only check for updates every 4 hours to avoid rate limiting
               if (lastAccessed && lastAccessed + fourHours > now) {
                 this.logger.debug(
                   `Skip checking for wakatime-cli updates because recently checked ${
@@ -157,6 +224,14 @@ export class Dependencies {
     }
   }
 
+  /**
+   * Fetches the latest CLI version from GitHub API
+   * @param callback - Callback function receiving version string (or empty on error)
+   */
+  /**
+   * Fetches the latest CLI version from GitHub API
+   * @param callback - Callback function receiving version string (or empty on error)
+   */
   private getLatestCliVersion(callback: (arg0: string) => void): void {
     this.options.getSetting('settings', 'proxy', false, (proxy: Setting) => {
       this.options.getSetting('settings', 'no_ssl_verify', false, (noSSLVerify: Setting) => {
@@ -168,17 +243,24 @@ export class Dependencies {
           },
         };
         this.logger.debug(`Fetching latest wakatime-cli version from GitHub API: ${options.url}`);
+        
+        // Apply proxy settings if configured
         if (proxy.value) {
           this.logger.debug(`Using Proxy: ${proxy.value}`);
           options['proxy'] = proxy.value;
         }
+        
+        // Disable SSL verification if configured (for corporate proxies)
         if (noSSLVerify.value === 'true') options['strictSSL'] = false;
+        
         try {
           request.get(options, (error, response, json) => {
             if (!error && response && response.statusCode == 200) {
               this.logger.debug(`GitHub API Response ${response.statusCode}`);
               const latestCliVersion = json['tag_name'];
               this.logger.debug(`Latest wakatime-cli version from GitHub: ${latestCliVersion}`);
+              
+              // Cache the timestamp to avoid rate limiting
               this.options.setSetting(
                 'internal',
                 'cli_version_last_accessed',
@@ -203,6 +285,10 @@ export class Dependencies {
     });
   }
 
+  /**
+   * Downloads and installs the wakatime-cli binary
+   * @param callback - Callback function to invoke after installation
+   */
   private installCli(callback: () => void): void {
     this.logger.debug(`Downloading wakatime-cli from GitHub...`);
     const url = this.cliDownloadUrl();
@@ -217,6 +303,11 @@ export class Dependencies {
     );
   }
 
+  /**
+   * Checks if a file is a symbolic link
+   * @param file - File path to check
+   * @returns true if file is a symlink
+   */
   private isSymlink(file: string): boolean {
     try {
       return fs.lstatSync(file).isSymbolicLink();
@@ -224,6 +315,11 @@ export class Dependencies {
     return false;
   }
 
+  /**
+   * Extracts CLI from zip file and sets up permissions
+   * @param zipFile - Path to downloaded zip file
+   * @param callback - Callback function to invoke after extraction
+   */
   private extractCli(zipFile: string, callback: () => void): void {
     this.logger.debug(`Extracting wakatime-cli into "${this.resourcesLocation}"...`);
     this.backupCli();
@@ -261,12 +357,18 @@ export class Dependencies {
     this.logger.debug('Finished extracting wakatime-cli.');
   }
 
+  /**
+   * Creates a backup of existing CLI binary before updating
+   */
   private backupCli() {
     if (fs.existsSync(this.getCliLocation())) {
       fs.renameSync(this.getCliLocation(), `${this.getCliLocation()}.backup`);
     }
   }
 
+  /**
+   * Restores CLI from backup if installation fails
+   */
   private restoreCli() {
     const backup = `${this.getCliLocation()}.backup`;
     if (fs.existsSync(backup)) {
@@ -274,6 +376,9 @@ export class Dependencies {
     }
   }
 
+  /**
+   * Removes backup CLI after successful installation
+   */
   private removeCli() {
     const backup = `${this.getCliLocation()}.backup`;
     if (fs.existsSync(backup)) {
@@ -281,6 +386,13 @@ export class Dependencies {
     }
   }
 
+  /**
+   * Downloads a file from URL to local path
+   * @param url - URL to download from
+   * @param outputFile - Local path to save file
+   * @param callback - Success callback
+   * @param error - Error callback
+   */
   private downloadFile(
     url: string,
     outputFile: string,
@@ -317,6 +429,12 @@ export class Dependencies {
     });
   }
 
+  /**
+   * Extracts zip file to output directory
+   * @param file - Path to zip file
+   * @param outputDir - Directory to extract to
+   * @param callback - Callback receiving true if successful
+   */
   private unzip(file: string, outputDir: string, callback: (unzipped: boolean) => void): void {
     if (fs.existsSync(file)) {
       try {
@@ -337,6 +455,11 @@ export class Dependencies {
     }
   }
 
+  /**
+   * Determines if current OS requires a legacy CLI version
+   * Used for older macOS versions that need specific CLI builds
+   * @returns CLI release tag for legacy OS, or undefined
+   */
   private legacyReleaseTag() {
     const osname = this.osName() as osName;
     const legacyOS = this.legacyOperatingSystems[osname];
@@ -351,6 +474,10 @@ export class Dependencies {
     return version?.tag;
   }
 
+  /**
+   * Gets normalized CPU architecture string for CLI binary
+   * @returns Architecture string (386, amd64, arm64, etc.)
+   */
   private architecture(): string {
     const arch = os.arch();
     if (arch.indexOf('32') > -1) return '386';
@@ -358,12 +485,21 @@ export class Dependencies {
     return arch;
   }
 
+  /**
+   * Gets normalized OS name for CLI binary
+   * @returns OS name string (darwin, windows, linux, etc.)
+   */
   private osName(): string {
     let osname = os.platform() as string;
     if (osname == 'win32') osname = 'windows';
     return osname;
   }
 
+  /**
+   * Constructs download URL for appropriate CLI binary
+   * Selects correct binary for OS, architecture, and legacy requirements
+   * @returns GitHub download URL for CLI zip file
+   */
   private cliDownloadUrl(): string {
     const osname = this.osName();
     const arch = this.architecture();
@@ -374,6 +510,7 @@ export class Dependencies {
       return `https://github.com/wakatime/wakatime-cli/releases/download/${tag}/wakatime-cli-${osname}-${arch}.zip`;
     }
 
+    // List of officially supported OS-architecture combinations
     const validCombinations = [
       'android-amd64',
       'android-arm64',
@@ -397,12 +534,20 @@ export class Dependencies {
       'windows-amd64',
       'windows-arm64',
     ];
+    
+    // Report to WakaTime if platform is not officially supported
     if (!validCombinations.includes(`${osname}-${arch}`))
       this.reportMissingPlatformSupport(osname, arch);
 
     return `${this.githubDownloadUrl}/wakatime-cli-${osname}-${arch}.zip`;
   }
 
+  /**
+   * Reports missing platform support to WakaTime API
+   * Helps WakaTime team prioritize new platform support
+   * @param osname - Operating system name
+   * @param architecture - CPU architecture
+   */
   private reportMissingPlatformSupport(osname: string, architecture: string): void {
     const url = `https://api.wakatime.com/api/v1/cli-missing?osname=${osname}&architecture=${architecture}&plugin=vscode`;
     this.options.getSetting('settings', 'proxy', false, (proxy: Setting) => {
@@ -417,6 +562,10 @@ export class Dependencies {
     });
   }
 
+  /**
+   * Generates a random string for temporary file names
+   * @returns Random alphanumeric string
+   */
   private randStr(): string {
     return (Math.random() + 1).toString(36).substring(7);
   }
